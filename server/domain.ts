@@ -7,6 +7,9 @@ import type {
   GraphEdge,
   GraphNode,
   OpenSessionRequest,
+  Relation,
+  RelationOrigin,
+  RelationType,
   SessionSnapshot,
   SkillSpec,
   SourceDocument,
@@ -22,10 +25,19 @@ type SourceDocumentState = SourceDocument & {
 
 type YamlDoc = ReturnType<typeof parseDocument>;
 
+interface PendingReference {
+  id: string;
+  type: RelationType;
+  sourceName: string;
+  targetName: string;
+  origin: RelationOrigin;
+}
+
 interface SessionState {
   id: string;
   scopeId: string;
   packageData: ConfigurationPackageState;
+  pendingReferences: PendingReference[];
   deletedDocumentPaths: string[];
 }
 
@@ -83,12 +95,16 @@ function createSession(request: OpenSessionRequest): SessionState {
     issues: [],
   };
 
-  return {
+  const session: SessionState = {
     id: randomUUID(),
     scopeId: request.scopeId,
     packageData,
+    pendingReferences: [],
     deletedDocumentPaths: [],
   };
+
+  normalizeRelations(session);
+  return session;
 }
 
 function parseSourceDocument(filePath: string, rawText: string): SourceDocumentState {
@@ -237,6 +253,157 @@ function applyInitialLayout(agents: AgentSpec[], skills: SkillSpec[]): void {
     });
 }
 
+function normalizeRelations(session: SessionState): void {
+  const agentByName = new Map(session.packageData.agents.map((agent) => [agent.name, agent]));
+  const skillByName = new Map(session.packageData.skills.map((skill) => [skill.name, skill]));
+  const relations: Relation[] = [];
+  const pendingReferences: PendingReference[] = [];
+
+  for (const agent of session.packageData.agents) {
+    for (const skillName of agent.referencedSkills) {
+      const skill = skillByName.get(skillName);
+      if (skill) {
+        upsertRelation(relations, "USES_SKILL", agent.id, skill.id, [
+          { location: "agent.skills", documentPath: agent.documentPath },
+        ]);
+      } else {
+        pendingReferences.push({
+          id: randomUUID(),
+          type: "USES_SKILL",
+          sourceName: agent.name,
+          targetName: skillName,
+          origin: {
+            location: "agent.skills",
+            documentPath: agent.documentPath,
+          },
+        });
+      }
+    }
+
+    for (const targetAgentName of agent.referencedAgents) {
+      const targetAgent = agentByName.get(targetAgentName);
+      if (targetAgent) {
+        upsertRelation(relations, "CALLS_AGENT", agent.id, targetAgent.id, [
+          { location: "agent.agents", documentPath: agent.documentPath },
+        ]);
+      } else {
+        pendingReferences.push({
+          id: randomUUID(),
+          type: "CALLS_AGENT",
+          sourceName: agent.name,
+          targetName: targetAgentName,
+          origin: {
+            location: "agent.agents",
+            documentPath: agent.documentPath,
+          },
+        });
+      }
+    }
+  }
+
+  for (const skill of session.packageData.skills) {
+    for (const agentName of skill.usedByAgents) {
+      const agent = agentByName.get(agentName);
+      if (agent) {
+        upsertRelation(relations, "USES_SKILL", agent.id, skill.id, [
+          { location: "skill.use-by", documentPath: skill.documentPath },
+        ]);
+      } else {
+        pendingReferences.push({
+          id: randomUUID(),
+          type: "USES_SKILL",
+          sourceName: agentName,
+          targetName: skill.name,
+          origin: {
+            location: "skill.use-by",
+            documentPath: skill.documentPath,
+          },
+        });
+      }
+    }
+  }
+
+  session.packageData.relations = relations.sort((left, right) => left.id.localeCompare(right.id));
+  session.pendingReferences = pendingReferences;
+  syncProjectionFields(session.packageData);
+}
+
+function syncProjectionFields(packageData: ConfigurationPackageState): void {
+  const agentById = new Map(packageData.agents.map((agent) => [agent.id, agent]));
+  const skillById = new Map(packageData.skills.map((skill) => [skill.id, skill]));
+
+  for (const agent of packageData.agents) {
+    agent.referencedSkills = [];
+    agent.referencedAgents = [];
+  }
+  for (const skill of packageData.skills) {
+    skill.usedByAgents = [];
+  }
+
+  for (const relation of packageData.relations) {
+    if (relation.type === "USES_SKILL") {
+      const agent = agentById.get(relation.sourceId);
+      const skill = skillById.get(relation.targetId);
+      if (agent && skill) {
+        agent.referencedSkills.push(skill.name);
+        skill.usedByAgents.push(agent.name);
+      }
+    }
+
+    if (relation.type === "CALLS_AGENT") {
+      const source = agentById.get(relation.sourceId);
+      const target = agentById.get(relation.targetId);
+      if (source && target) {
+        source.referencedAgents.push(target.name);
+      }
+    }
+  }
+
+  for (const agent of packageData.agents) {
+    agent.referencedSkills = uniqueSorted(agent.referencedSkills);
+    agent.referencedAgents = uniqueSorted(agent.referencedAgents);
+  }
+
+  for (const skill of packageData.skills) {
+    skill.usedByAgents = uniqueSorted(skill.usedByAgents);
+  }
+}
+
+function upsertRelation(
+  relations: Relation[],
+  type: RelationType,
+  sourceId: string,
+  targetId: string,
+  origin: RelationOrigin[],
+): void {
+  const relationId = buildRelationId(type, sourceId, targetId);
+  const existing = relations.find((relation) => relation.id === relationId);
+  if (!existing) {
+    relations.push({
+      id: relationId,
+      type,
+      sourceId,
+      targetId,
+      origin: [...origin],
+    });
+    return;
+  }
+
+  for (const originItem of origin) {
+    const hasOrigin = existing.origin.some(
+      (candidate) =>
+        candidate.location === originItem.location && candidate.documentPath === originItem.documentPath,
+    );
+    if (!hasOrigin) {
+      existing.origin.push(originItem);
+    }
+  }
+}
+
+function buildRelationId(type: RelationType, sourceId: string, targetId: string): string {
+  return `${type}:${sourceId}->${targetId}`;
+}
+
 function buildSnapshot(session: SessionState): SessionSnapshot {
   const issues = session.packageData.issues;
   const issueCounts = countIssuesByEntity(issues);
@@ -363,5 +530,4 @@ export function ensureConfigMap(yamlDoc: YamlDoc): void {
   }
 }
 
-// Suppress "unused" warnings for imports kept for future stages.
 void path;

@@ -4,6 +4,8 @@ import { isMap, parseDocument } from "yaml";
 import type {
   AgentSpec,
   ConfigurationPackage,
+  CreateNodePayload,
+  CreateRelationPayload,
   GraphEdge,
   GraphNode,
   OpenSessionRequest,
@@ -13,6 +15,8 @@ import type {
   SessionSnapshot,
   SkillSpec,
   SourceDocument,
+  UpdateNodePayload,
+  UpdatePositionPayload,
   ValidationIssue,
   VisualMeta,
 } from "../shared/types";
@@ -45,6 +49,9 @@ interface ConfigurationPackageState extends ConfigurationPackage {
   documents: SourceDocumentState[];
 }
 
+type MutableNode = AgentSpec | SkillSpec;
+
+const SUPPORTED_SCHEMA_VERSIONS = new Set(["v0.1"]);
 const KNOWN_AGENT_KEYS = new Set(["name", "schemaVersion", "description", "tools", "skills", "agents"]);
 const KNOWN_SKILL_KEYS = new Set(["name", "description", "use-by"]);
 
@@ -60,6 +67,156 @@ export class SessionManager {
   getSnapshot(sessionId: string): SessionSnapshot | undefined {
     const session = this.sessions.get(sessionId);
     return session ? buildSnapshot(session) : undefined;
+  }
+
+  updateNode(sessionId: string, nodeId: string, payload: UpdateNodePayload): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    const node = findNode(session, nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} was not found`);
+    }
+
+    if (typeof payload.name === "string") {
+      node.name = payload.name.trim();
+      maybeUpdateGeneratedDocumentPath(session, node);
+    }
+
+    if (typeof payload.description === "string") {
+      node.description = payload.description;
+    }
+
+    if ("schemaVersion" in payload && "schemaVersion" in node && typeof payload.schemaVersion === "string") {
+      node.schemaVersion = payload.schemaVersion.trim();
+    }
+
+    if ("tools" in payload && "tools" in node && Array.isArray(payload.tools)) {
+      node.tools = sanitizeStringArray(payload.tools);
+    }
+
+    reconcilePendingReferences(session);
+    validatePackage(session);
+    return buildSnapshot(session);
+  }
+
+  updateNodePosition(sessionId: string, nodeId: string, payload: UpdatePositionPayload): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    const node = findNode(session, nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} was not found`);
+    }
+    node.visualMeta.x = payload.x;
+    node.visualMeta.y = payload.y;
+    return buildSnapshot(session);
+  }
+
+  createNode(sessionId: string, payload: CreateNodePayload): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    const nodeId = randomUUID();
+    const seedName = buildUniqueGeneratedName(session, payload.kind);
+    const visualMeta = nextVisualMeta(session, payload.kind);
+
+    if (payload.kind === "agent") {
+      const agent: AgentSpec = {
+        id: nodeId,
+        name: seedName,
+        schemaVersion: "v0.1",
+        description: "",
+        tools: [],
+        referencedSkills: [],
+        referencedAgents: [],
+        extraFields: {},
+        visualMeta,
+        documentPath: buildGeneratedPath("agent", seedName),
+        isNew: true,
+      };
+      session.packageData.agents.push(agent);
+      session.packageData.documents.push(createGeneratedDocument(agent.id, agent.documentPath, "agent"));
+    } else {
+      const skill: SkillSpec = {
+        id: nodeId,
+        name: seedName,
+        description: "",
+        usedByAgents: [],
+        extraFields: {},
+        visualMeta,
+        documentPath: buildGeneratedPath("skill", seedName),
+        isNew: true,
+      };
+      session.packageData.skills.push(skill);
+      session.packageData.documents.push(createGeneratedDocument(skill.id, skill.documentPath, "skill"));
+    }
+
+    reconcilePendingReferences(session);
+    validatePackage(session);
+    return buildSnapshot(session);
+  }
+
+  createRelation(sessionId: string, payload: CreateRelationPayload): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    const source = findNode(session, payload.sourceId);
+    const target = findNode(session, payload.targetId);
+    if (!source || !target) {
+      throw new Error("Source or target node was not found");
+    }
+
+    const relationType = resolveRelationType(source, target);
+    if (!relationType) {
+      throw new Error("This connection type is not allowed");
+    }
+
+    upsertRelation(session.packageData.relations, relationType, source.id, target.id, []);
+    syncProjectionFields(session.packageData);
+    reconcilePendingReferences(session);
+    validatePackage(session);
+    return buildSnapshot(session);
+  }
+
+  deleteRelation(sessionId: string, relationId: string): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    session.packageData.relations = session.packageData.relations.filter((relation) => relation.id !== relationId);
+    syncProjectionFields(session.packageData);
+    validatePackage(session);
+    return buildSnapshot(session);
+  }
+
+  deleteNode(sessionId: string, nodeId: string): SessionSnapshot {
+    const session = this.getRequiredSession(sessionId);
+    const node = findNode(session, nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} was not found`);
+    }
+
+    const document =
+      session.packageData.documents.find((candidate) => candidate.entityId === node.id) ??
+      session.packageData.documents.find((candidate) => candidate.path === node.documentPath);
+
+    if ("schemaVersion" in node) {
+      session.packageData.agents = session.packageData.agents.filter((agent) => agent.id !== node.id);
+    } else {
+      session.packageData.skills = session.packageData.skills.filter((skill) => skill.id !== node.id);
+    }
+
+    session.packageData.documents = session.packageData.documents.filter((candidate) => candidate !== document);
+    session.packageData.relations = session.packageData.relations.filter(
+      (relation) => relation.sourceId !== node.id && relation.targetId !== node.id,
+    );
+    session.pendingReferences = session.pendingReferences.filter((pending) => !pendingReferenceTouchesNode(pending, node));
+
+    if (!node.isNew && !document?.generatedFromUi) {
+      session.deletedDocumentPaths = uniqueSorted([...session.deletedDocumentPaths, document?.path ?? node.documentPath]);
+    }
+
+    syncProjectionFields(session.packageData);
+    validatePackage(session);
+    return buildSnapshot(session);
+  }
+
+  private getRequiredSession(sessionId: string): SessionState {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} was not found`);
+    }
+    return session;
   }
 }
 
@@ -104,6 +261,7 @@ function createSession(request: OpenSessionRequest): SessionState {
   };
 
   normalizeRelations(session);
+  validatePackage(session);
   return session;
 }
 
@@ -404,6 +562,263 @@ function buildRelationId(type: RelationType, sourceId: string, targetId: string)
   return `${type}:${sourceId}->${targetId}`;
 }
 
+function reconcilePendingReferences(session: SessionState): void {
+  const agentByName = new Map(session.packageData.agents.map((agent) => [agent.name, agent]));
+  const skillByName = new Map(session.packageData.skills.map((skill) => [skill.name, skill]));
+  const remaining: PendingReference[] = [];
+
+  for (const pending of session.pendingReferences) {
+    const source = agentByName.get(pending.sourceName);
+    const target =
+      pending.type === "USES_SKILL" ? skillByName.get(pending.targetName) : agentByName.get(pending.targetName);
+
+    if (source && target) {
+      upsertRelation(session.packageData.relations, pending.type, source.id, target.id, [pending.origin]);
+      continue;
+    }
+    remaining.push(pending);
+  }
+
+  session.pendingReferences = remaining;
+  syncProjectionFields(session.packageData);
+}
+
+function pendingReferenceTouchesNode(pending: PendingReference, node: MutableNode): boolean {
+  if (pending.origin.documentPath === node.documentPath) {
+    return true;
+  }
+
+  const normalizedName = node.name.trim();
+  if (!normalizedName) {
+    return false;
+  }
+
+  return pending.sourceName === normalizedName || pending.targetName === normalizedName;
+}
+
+function validatePackage(session: SessionState): ValidationIssue[] {
+  reconcilePendingReferences(session);
+
+  const issues: ValidationIssue[] = [];
+  const packageData = session.packageData;
+  const agentById = new Map(packageData.agents.map((agent) => [agent.id, agent]));
+  const skillById = new Map(packageData.skills.map((skill) => [skill.id, skill]));
+  const agentByName = new Map(packageData.agents.map((agent) => [agent.name, agent]));
+  const skillByName = new Map(packageData.skills.map((skill) => [skill.name, skill]));
+
+  for (const document of packageData.documents) {
+    if (!document.roundTripState.hasFrontmatter) {
+      issues.push({
+        severity: "error",
+        code: "FM_MISSING",
+        message: "Document does not contain a frontmatter block",
+        documentPath: document.path,
+      });
+    }
+    if (document.roundTripState.parseError) {
+      issues.push({
+        severity: "error",
+        code: "FM_PARSE",
+        message: document.roundTripState.parseError,
+        documentPath: document.path,
+      });
+    }
+    if (document.kind === "unknown" && document.roundTripState.hasFrontmatter && !document.roundTripState.parseError) {
+      issues.push({
+        severity: "warning",
+        code: "DOC_KIND_UNKNOWN",
+        message: "Document frontmatter was parsed, but the document kind could not be inferred",
+        documentPath: document.path,
+      });
+    }
+  }
+
+  validateNodeFields(packageData.agents, issues, "agent");
+  validateNodeFields(packageData.skills, issues, "skill");
+
+  for (const pending of session.pendingReferences) {
+    const relatedEntityId = agentByName.get(pending.sourceName)?.id ?? skillByName.get(pending.targetName)?.id;
+    issues.push({
+      severity: "error",
+      code: "REFERENCE_UNRESOLVED",
+      message: `Reference ${pending.sourceName} -> ${pending.targetName} from ${pending.origin.location} cannot be resolved`,
+      documentPath: pending.origin.documentPath,
+      fieldPath: pending.origin.location,
+      relatedEntityId,
+    });
+  }
+
+  for (const relation of packageData.relations) {
+    if (relation.type === "USES_SKILL") {
+      const fromAgent = relation.origin.some((origin) => origin.location === "agent.skills");
+      const fromSkill = relation.origin.some((origin) => origin.location === "skill.use-by");
+      if ((fromAgent || fromSkill) && !(fromAgent && fromSkill)) {
+        issues.push({
+          severity: "warning",
+          code: "RELATION_ONE_SIDED",
+          message: "Agent/skill relation exists only in one YAML projection and will be normalized on export",
+          relatedEntityId: relation.id,
+        });
+      }
+    }
+  }
+
+  for (const relation of packageData.relations) {
+    if (relation.type === "CALLS_AGENT") {
+      const source = agentById.get(relation.sourceId);
+      const target = agentById.get(relation.targetId);
+      if (!source || !target) {
+        issues.push({
+          severity: "error",
+          code: "RELATION_INVALID",
+          message: "Agent-to-agent relation points to a missing node",
+          relatedEntityId: relation.id,
+        });
+      }
+    }
+    if (relation.type === "USES_SKILL") {
+      const source = agentById.get(relation.sourceId);
+      const target = skillById.get(relation.targetId);
+      if (!source || !target) {
+        issues.push({
+          severity: "error",
+          code: "RELATION_INVALID",
+          message: "Agent-to-skill relation points to a missing node",
+          relatedEntityId: relation.id,
+        });
+      }
+    }
+  }
+
+  issues.push(...detectAgentCycles(packageData.agents, packageData.relations));
+
+  packageData.issues = issues;
+  return issues;
+}
+
+function validateNodeFields(nodes: MutableNode[], issues: ValidationIssue[], kind: "agent" | "skill"): void {
+  const nameCounts = new Map<string, number>();
+
+  for (const node of nodes) {
+    if (!node.name) {
+      issues.push({
+        severity: "error",
+        code: "NAME_REQUIRED",
+        message: `${capitalize(kind)} name is required`,
+        documentPath: node.documentPath,
+        fieldPath: "name",
+        relatedEntityId: node.id,
+      });
+    }
+
+    if (node.name && !/^[A-Za-z0-9_-]{1,50}$/.test(node.name)) {
+      issues.push({
+        severity: "error",
+        code: "NAME_INVALID",
+        message: `${capitalize(kind)} name must be 1-50 chars and contain only Latin letters, digits, hyphens, or underscores`,
+        documentPath: node.documentPath,
+        fieldPath: "name",
+        relatedEntityId: node.id,
+      });
+    }
+
+    if ("schemaVersion" in node) {
+      if (!node.schemaVersion) {
+        issues.push({
+          severity: "error",
+          code: "SCHEMA_REQUIRED",
+          message: "Agent schemaVersion is required",
+          documentPath: node.documentPath,
+          fieldPath: "schemaVersion",
+          relatedEntityId: node.id,
+        });
+      } else if (!SUPPORTED_SCHEMA_VERSIONS.has(node.schemaVersion)) {
+        issues.push({
+          severity: "error",
+          code: "SCHEMA_UNSUPPORTED",
+          message: `Unsupported schemaVersion: ${node.schemaVersion}`,
+          documentPath: node.documentPath,
+          fieldPath: "schemaVersion",
+          relatedEntityId: node.id,
+        });
+      }
+    }
+
+    if (node.name) {
+      nameCounts.set(node.name, (nameCounts.get(node.name) ?? 0) + 1);
+    }
+  }
+
+  for (const node of nodes) {
+    if (node.name && (nameCounts.get(node.name) ?? 0) > 1) {
+      issues.push({
+        severity: "error",
+        code: "NAME_DUPLICATE",
+        message: `${capitalize(kind)} name "${node.name}" is duplicated`,
+        documentPath: node.documentPath,
+        fieldPath: "name",
+        relatedEntityId: node.id,
+      });
+    }
+  }
+}
+
+function detectAgentCycles(agents: AgentSpec[], relations: Relation[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const adjacency = new Map<string, string[]>();
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+
+  for (const agent of agents) {
+    adjacency.set(agent.id, []);
+  }
+
+  for (const relation of relations) {
+    if (relation.type !== "CALLS_AGENT") {
+      continue;
+    }
+    adjacency.get(relation.sourceId)?.push(relation.targetId);
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const visit = (nodeId: string, stack: string[]): void => {
+    if (visiting.has(nodeId)) {
+      const cycleStart = stack.indexOf(nodeId);
+      const cycle = stack.slice(cycleStart).concat(nodeId);
+      const labels = cycle.map((id) => agentById.get(id)?.name ?? id).join(" -> ");
+      issues.push({
+        severity: "error",
+        code: "AGENT_CYCLE",
+        message: `Agent call graph contains a cycle: ${labels}`,
+        relatedEntityId: nodeId,
+      });
+      return;
+    }
+
+    if (visited.has(nodeId)) {
+      return;
+    }
+
+    visiting.add(nodeId);
+    stack.push(nodeId);
+
+    for (const nextNodeId of adjacency.get(nodeId) ?? []) {
+      visit(nextNodeId, stack);
+    }
+
+    stack.pop();
+    visiting.delete(nodeId);
+    visited.add(nodeId);
+  };
+
+  for (const agent of agents) {
+    visit(agent.id, []);
+  }
+
+  return issues;
+}
+
 function buildSnapshot(session: SessionState): SessionSnapshot {
   const issues = session.packageData.issues;
   const issueCounts = countIssuesByEntity(issues);
@@ -486,6 +901,80 @@ function countIssuesByEntity(issues: ValidationIssue[]): Map<string, number> {
   return counts;
 }
 
+function findNode(session: SessionState, nodeId: string): MutableNode | undefined {
+  return session.packageData.agents.find((agent) => agent.id === nodeId) ?? session.packageData.skills.find((skill) => skill.id === nodeId);
+}
+
+function nextVisualMeta(session: SessionState, kind: "agent" | "skill"): VisualMeta {
+  const baseX = kind === "agent" ? 120 : 520;
+  const count = kind === "agent" ? session.packageData.agents.length : session.packageData.skills.length;
+  return {
+    x: baseX,
+    y: 120 + count * 140,
+    collapsed: false,
+    selected: false,
+  };
+}
+
+function createGeneratedDocument(entityId: string, filePath: string, kind: SourceDocument["kind"]): SourceDocumentState {
+  return {
+    path: filePath,
+    kind,
+    rawText: "",
+    frontmatterText: "",
+    markdownBody: "",
+    extraFields: {},
+    roundTripState: {
+      hasFrontmatter: true,
+      preservedKeys: [],
+    },
+    yamlDoc: parseDocument("", { keepSourceTokens: true, strict: false }),
+    generatedFromUi: true,
+    entityId,
+  };
+}
+
+function maybeUpdateGeneratedDocumentPath(session: SessionState, node: MutableNode): void {
+  if (!node.isNew) {
+    return;
+  }
+  const nextPath = buildGeneratedPath("schemaVersion" in node ? "agent" : "skill", node.name || node.id);
+  const document = session.packageData.documents.find((candidate) => candidate.entityId === node.id);
+  if (!document) {
+    return;
+  }
+  document.path = nextPath;
+  node.documentPath = nextPath;
+}
+
+function buildGeneratedPath(kind: "agent" | "skill", name: string): string {
+  const slug = slugify(name || randomUUID());
+  return kind === "agent" ? path.posix.join("agents", `${slug}.md`) : path.posix.join("skills", slug, "SKILL.md");
+}
+
+function buildUniqueGeneratedName(session: SessionState, kind: "agent" | "skill"): string {
+  const existingNames = new Set(
+    (kind === "agent" ? session.packageData.agents : session.packageData.skills).map((node) => node.name),
+  );
+
+  let index = 1;
+  while (existingNames.has(`${kind}-${index}`)) {
+    index += 1;
+  }
+
+  return `${kind}-${index}`;
+}
+
+function resolveRelationType(source: MutableNode, target: MutableNode): RelationType | null {
+  if ("schemaVersion" in source && "schemaVersion" in target) {
+    return "CALLS_AGENT";
+  }
+  if ("schemaVersion" in source && !("schemaVersion" in target)) {
+    return "USES_SKILL";
+  }
+  return null;
+}
+
 function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -512,12 +1001,24 @@ function uniqueSorted(values: string[]): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50) || "node";
+}
+
 function toPlainObject(yamlDoc: YamlDoc): Record<string, unknown> {
   const value = yamlDoc.toJS();
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 export function isConfigurationDocumentPath(filePath: string): boolean {
@@ -529,5 +1030,3 @@ export function ensureConfigMap(yamlDoc: YamlDoc): void {
     yamlDoc.contents = yamlDoc.createNode({});
   }
 }
-
-void path;

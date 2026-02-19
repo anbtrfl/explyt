@@ -6,6 +6,7 @@ import type {
   ConfigurationPackage,
   CreateNodePayload,
   CreateRelationPayload,
+  ExportPackage,
   GraphEdge,
   GraphNode,
   OpenSessionRequest,
@@ -67,6 +68,27 @@ export class SessionManager {
   getSnapshot(sessionId: string): SessionSnapshot | undefined {
     const session = this.sessions.get(sessionId);
     return session ? buildSnapshot(session) : undefined;
+  }
+
+  validate(sessionId: string): ExportPackage {
+    const session = this.getRequiredSession(sessionId);
+    const issues = validatePackage(session);
+    return {
+      blocked: issues.some((issue) => issue.severity === "error"),
+      changedDocuments: [],
+      deletedDocuments: [],
+      issues,
+    };
+  }
+
+  export(sessionId: string): ExportPackage {
+    const session = this.getRequiredSession(sessionId);
+    const issues = validatePackage(session);
+    const blocked = issues.some((issue) => issue.severity === "error");
+    if (blocked) {
+      return { blocked, changedDocuments: [], deletedDocuments: [], issues };
+    }
+    return exportPackage(session, issues);
   }
 
   updateNode(sessionId: string, nodeId: string, payload: UpdateNodePayload): SessionSnapshot {
@@ -817,6 +839,59 @@ function detectAgentCycles(agents: AgentSpec[], relations: Relation[]): Validati
   }
 
   return issues;
+}
+
+function exportPackage(session: SessionState, issues: ValidationIssue[]): ExportPackage {
+  const packageData = session.packageData;
+  const changedDocuments = [...packageData.agents, ...packageData.skills]
+    .map((node) => projectNodeIntoDocument(packageData, node))
+    .sort((left, right) => left.path.localeCompare(right.path));
+
+  return {
+    blocked: false,
+    changedDocuments,
+    deletedDocuments: [...session.deletedDocumentPaths].sort((left, right) => left.localeCompare(right)),
+    issues,
+  };
+}
+
+function projectNodeIntoDocument(packageData: ConfigurationPackageState, node: MutableNode): { path: string; text: string } {
+  const documentState =
+    packageData.documents.find((document) => document.entityId === node.id) ??
+    packageData.documents.find((document) => document.path === node.documentPath);
+
+  if (!documentState) {
+    throw new Error(`Document state for ${node.documentPath} was not found`);
+  }
+
+  const yamlDoc = documentState.yamlDoc ?? parseDocument("", { keepSourceTokens: true, strict: false });
+  writeKnownFields(yamlDoc, node);
+
+  const serializedFrontmatter = yamlDoc.toString({ defaultKeyType: "PLAIN" }).trimEnd();
+  const body = documentState.markdownBody ? `\n${documentState.markdownBody}` : "\n";
+
+  return {
+    path: node.documentPath,
+    text: `---\n${serializedFrontmatter}\n---${body}`,
+  };
+}
+
+function writeKnownFields(yamlDoc: YamlDoc, node: MutableNode): void {
+  yamlDoc.set("name", node.name || "");
+  yamlDoc.set("description", node.description || "");
+
+  if ("schemaVersion" in node) {
+    yamlDoc.set("schemaVersion", node.schemaVersion || "");
+    yamlDoc.set("tools", sanitizeStringArray(node.tools));
+    yamlDoc.set("skills", sanitizeStringArray(node.referencedSkills));
+    if (node.referencedAgents.length > 0 || yamlDoc.has("agents")) {
+      yamlDoc.set("agents", sanitizeStringArray(node.referencedAgents));
+    }
+  } else {
+    if (node.usedByAgents.length > 0 || yamlDoc.has("use-by")) {
+      yamlDoc.set("use-by", sanitizeStringArray(node.usedByAgents));
+    }
+  }
 }
 
 function buildSnapshot(session: SessionState): SessionSnapshot {

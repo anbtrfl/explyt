@@ -1,0 +1,155 @@
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type {
+  CreateNodePayload,
+  CreateRelationPayload,
+  OpenSessionRequest,
+  UpdateNodePayload,
+  UpdatePositionPayload,
+} from "../shared/types";
+import { SessionManager } from "./domain";
+import { loadWorkspaceDocuments } from "./demo";
+import { saveExportedDocuments } from "./repository";
+
+const app = express();
+const port = Number(process.env.PORT ?? 3001);
+const sessionManager = new SessionManager();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, "..");
+const distDir = path.join(projectRoot, "dist");
+
+app.use(express.json({ limit: "5mb" }));
+
+app.get("/api/health", (_request, response) => {
+  response.json({ ok: true });
+});
+
+app.get("/api/demo/documents", async (_request, response, next) => {
+  try {
+    response.json(await loadWorkspaceDocuments(projectRoot));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/open", (request, response, next) => {
+  try {
+    response.json(sessionManager.openSession(request.body as OpenSessionRequest));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/sessions/:sessionId", (request, response, next) => {
+  try {
+    const snapshot = sessionManager.getSnapshot(request.params.sessionId);
+    if (!snapshot) {
+      response.status(404).json({ message: "Session was not found" });
+      return;
+    }
+    response.json(snapshot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/validate", (request, response, next) => {
+  try {
+    response.json(sessionManager.validate(request.params.sessionId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/export", (request, response, next) => {
+  try {
+    response.json(sessionManager.export(request.params.sessionId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/save", async (request, response, next) => {
+  try {
+    const exportPackage = sessionManager.export(request.params.sessionId);
+    response.json(await saveExportedDocuments(projectRoot, exportPackage));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/nodes", (request, response, next) => {
+  try {
+    response.json(sessionManager.createNode(request.params.sessionId, request.body as CreateNodePayload));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/sessions/:sessionId/nodes/:nodeId", (request, response, next) => {
+  try {
+    response.json(
+      sessionManager.updateNode(request.params.sessionId, request.params.nodeId, request.body as UpdateNodePayload),
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/sessions/:sessionId/nodes/:nodeId/position", (request, response, next) => {
+  try {
+    response.json(
+      sessionManager.updateNodePosition(
+        request.params.sessionId,
+        request.params.nodeId,
+        request.body as UpdatePositionPayload,
+      ),
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/sessions/:sessionId/nodes/:nodeId", (request, response, next) => {
+  try {
+    response.json(sessionManager.deleteNode(request.params.sessionId, request.params.nodeId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/relations", (request, response, next) => {
+  try {
+    response.json(sessionManager.createRelation(request.params.sessionId, request.body as CreateRelationPayload));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/sessions/:sessionId/relations/:relationId", (request, response, next) => {
+  try {
+    response.json(sessionManager.deleteRelation(request.params.sessionId, request.params.relationId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  const message = error instanceof Error ? error.message : "Unexpected server error";
+  response.status(400).json({ message });
+});
+
+app.use(express.static(distDir));
+
+app.get(/^(?!\/api\/).*/, (request, response) => {
+  if (request.path.startsWith("/api/")) {
+    response.status(404).json({ message: "API route was not found" });
+    return;
+  }
+  response.sendFile(path.join(distDir, "index.html"));
+});
+
+app.listen(port, () => {
+  console.log(`Server listening on http://localhost:${port}`);
+});

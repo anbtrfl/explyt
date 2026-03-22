@@ -1,9 +1,20 @@
-import { useEffect, useState } from "react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type ReactFlowInstance,
+} from "@xyflow/react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { ConfigNode } from "./components/ConfigNode";
 import type {
   AgentSpec,
   DemoDocumentsResponse,
   ExportPackage,
+  GraphEdge,
   OpenSessionRequest,
   SessionSnapshot,
   SkillSpec,
@@ -11,6 +22,18 @@ import type {
 } from "../shared/types";
 
 type EditableNode = AgentSpec | SkillSpec;
+
+const MIN_ZOOM = 0.4;
+const MAX_ZOOM = 2;
+const WORKSPACE_EXTENT: [[number, number], [number, number]] = [
+  [-1200, -1200],
+  [3200, 5200],
+];
+
+const nodeTypes = {
+  agent: ConfigNode,
+  skill: ConfigNode,
+};
 
 const EMPTY_OPEN_PAYLOAD = JSON.stringify(
   {
@@ -29,10 +52,14 @@ const EMPTY_OPEN_PAYLOAD = JSON.stringify(
 export function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [payloadText, setPayloadText] = useState(EMPTY_OPEN_PAYLOAD);
   const [validationResult, setValidationResult] = useState<ExportPackage | null>(null);
+  const [exportResult, setExportResult] = useState<ExportPackage | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>("Load the workspace package or open a payload.");
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [fitViewToken, setFitViewToken] = useState(0);
+  const reactFlowInstanceRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
 
   const selectedNode = findSelectedNode(session, selectedNodeId);
   const issues = session?.packageData.issues ?? [];
@@ -42,6 +69,32 @@ export function App() {
     void loadWorkspaceSample();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!session?.sessionId || !reactFlowInstanceRef.current || fitViewToken === 0) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      void reactFlowInstanceRef.current?.fitView({ duration: 0, padding: 0.2 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [fitViewToken, session?.sessionId]);
+
+  const flowNodes: Node[] = session
+    ? session.graph.nodes.map((node) => ({
+        id: node.id,
+        type: node.type,
+        position: node.position,
+        data: node.data,
+        draggable: true,
+        selected: node.id === selectedNodeId,
+      }))
+    : [];
+
+  const flowEdges: Edge[] = session
+    ? session.graph.edges.map((edge) => buildFlowEdge(edge, edge.id === selectedEdgeId))
+    : [];
+  const flowKey = session ? buildFlowKey(session) : "empty";
 
   async function withBusy<T>(label: string, action: () => Promise<T>): Promise<T | undefined> {
     setBusyLabel(label);
@@ -55,6 +108,14 @@ export function App() {
     }
   }
 
+  function applySnapshot(nextSession: SessionSnapshot): void {
+    setSession(nextSession);
+    setValidationResult(null);
+    setExportResult(null);
+    setSelectedEdgeId(null);
+    setSelectedNodeId(nextSession.graph.nodes[0]?.id ?? null);
+  }
+
   async function loadWorkspaceSample(): Promise<void> {
     const payload = await withBusy("Loading workspace package", () => api.get<DemoDocumentsResponse>("/demo/documents"));
     if (!payload) {
@@ -65,9 +126,8 @@ export function App() {
     if (!snapshot) {
       return;
     }
-    setSession(snapshot);
-    setValidationResult(null);
-    setSelectedNodeId(snapshot.graph.nodes[0]?.id ?? null);
+    applySnapshot(snapshot);
+    setFitViewToken((current) => current + 1);
     setStatusMessage(
       `Opened ${snapshot.packageData.documents.length} documents: ${snapshot.packageData.agents.length} agents, ${snapshot.packageData.skills.length} skills.`,
     );
@@ -85,9 +145,8 @@ export function App() {
     if (!snapshot) {
       return;
     }
-    setSession(snapshot);
-    setValidationResult(null);
-    setSelectedNodeId(snapshot.graph.nodes[0]?.id ?? null);
+    applySnapshot(snapshot);
+    setFitViewToken((current) => current + 1);
     setStatusMessage(`Opened payload for scope ${snapshot.scopeId}.`);
   }
 
@@ -102,15 +161,49 @@ export function App() {
       return;
     }
     setValidationResult(result);
-    const issueCount = result.issues.length;
     setStatusMessage(
       result.blocked
-        ? `Validation found ${issueCount} issue${issueCount === 1 ? "" : "s"} and export is currently blocked.`
-        : issueCount === 0
+        ? `Validation found ${result.issues.length} issues and export is currently blocked.`
+        : result.issues.length === 0
           ? "Validation passed with no issues."
-          : `Validation completed with ${issueCount} issue${issueCount === 1 ? "" : "s"}.`,
+          : `Validation completed with ${result.issues.length} issues.`,
     );
   }
+
+  async function runExport(): Promise<void> {
+    if (!session) {
+      return;
+    }
+    const result = await withBusy("Exporting documents", () =>
+      api.post<ExportPackage>(`/sessions/${session.sessionId}/export`, {}),
+    );
+    if (!result) {
+      return;
+    }
+    setExportResult(result);
+    setStatusMessage(
+      result.blocked
+        ? `Export blocked by ${result.issues.filter((i) => i.severity === "error").length} errors.`
+        : `Prepared ${result.changedDocuments.length} markdown documents.`,
+    );
+  }
+
+  function centerGraph(): void {
+    if (!session) {
+      return;
+    }
+    if (reactFlowInstanceRef.current) {
+      void reactFlowInstanceRef.current.fitView({ duration: 180, padding: 0.2 });
+    } else {
+      setFitViewToken((current) => current + 1);
+    }
+    setStatusMessage("Graph centered.");
+  }
+
+  const handleNodeClick = (_event: unknown, node: Node) => {
+    setSelectedNodeId(node.id);
+    setSelectedEdgeId(null);
+  };
 
   return (
     <div className="app-shell">
@@ -118,7 +211,7 @@ export function App() {
         <div>
           <h1>Agent Config Visualizer</h1>
           <p className="topbar__text">
-            Markdown + YAML frontmatter import, validation, and export preview.
+            Markdown + YAML frontmatter import, node-based view, validation, and export preview.
           </p>
         </div>
       </header>
@@ -141,21 +234,63 @@ export function App() {
             <button className="button button--ghost" onClick={() => void loadWorkspaceSample()}>
               Reload workspace
             </button>
+            <button className="button button--ghost" disabled={!session} onClick={() => centerGraph()}>
+              Center graph
+            </button>
             <button className="button" disabled={!session} onClick={() => void runValidation()}>
               Validate
+            </button>
+            <button className="button" disabled={!session} onClick={() => void runExport()}>
+              Export preview
             </button>
             <button className="button button--ghost" onClick={() => void openPayload()}>
               Open payload
             </button>
           </div>
 
-          <textarea
-            className="payload-editor"
-            value={payloadText}
-            onChange={(event) => setPayloadText(event.target.value)}
-            spellCheck={false}
-            aria-label="JSON workspace description"
-          />
+          <div className="canvas-stage">
+            {session ? (
+              <ReactFlow
+                key={flowKey}
+                edges={flowEdges}
+                maxZoom={MAX_ZOOM}
+                minZoom={MIN_ZOOM}
+                nodeTypes={nodeTypes}
+                nodes={flowNodes}
+                onInit={(instance) => {
+                  reactFlowInstanceRef.current = instance;
+                }}
+                onNodeClick={handleNodeClick}
+                onEdgeClick={(_event, edge) => {
+                  setSelectedEdgeId(edge.id);
+                  setSelectedNodeId(null);
+                }}
+                onPaneClick={() => {
+                  setSelectedNodeId(null);
+                  setSelectedEdgeId(null);
+                }}
+                nodeExtent={WORKSPACE_EXTENT}
+                proOptions={{ hideAttribution: true }}
+                translateExtent={WORKSPACE_EXTENT}
+              >
+                <Controls />
+                <Background color="rgba(255, 255, 255, 0.08)" gap={24} variant={BackgroundVariant.Lines} />
+              </ReactFlow>
+            ) : (
+              <div className="canvas-empty">Open a session to render the graph.</div>
+            )}
+          </div>
+
+          <details className="advanced-panel">
+            <summary>Advanced: paste a JSON workspace</summary>
+            <textarea
+              className="payload-editor"
+              value={payloadText}
+              onChange={(event) => setPayloadText(event.target.value)}
+              spellCheck={false}
+              aria-label="JSON workspace description"
+            />
+          </details>
         </section>
 
         <aside className="panel panel--right">
@@ -183,15 +318,39 @@ export function App() {
             )}
           </section>
 
+          <section className="section-card section-card--stretch">
+            <div className="section-card__header">
+              <h2>Export Preview</h2>
+              {exportResult ? (
+                <span className={`severity-badge ${exportResult.blocked ? "severity-badge--error" : "severity-badge--ok"}`}>
+                  {exportResult.blocked ? "blocked" : "ready"}
+                </span>
+              ) : null}
+            </div>
+
+            {!exportResult ? (
+              <p className="empty-state">Run export preview to inspect changed markdown documents.</p>
+            ) : (
+              <div className="export-docs">
+                {exportResult.changedDocuments.map((document) => (
+                  <details className="export-doc" key={document.path} open>
+                    <summary>{document.path}</summary>
+                    <pre>{document.text}</pre>
+                  </details>
+                ))}
+              </div>
+            )}
+          </section>
+
           {selectedNode ? (
             <section className="section-card">
-              <h2>Selected</h2>
+              <h2>Selected node</h2>
               <div className="meta-block">
                 <div className="meta-block__label">Name</div>
                 <div className="meta-block__value">{selectedNode.name}</div>
               </div>
               <div className="meta-block">
-                <div className="meta-block__label">Document</div>
+                <div className="meta-block__label">Document path</div>
                 <div className="meta-block__value">{selectedNode.documentPath}</div>
               </div>
             </section>
@@ -200,6 +359,22 @@ export function App() {
       </main>
     </div>
   );
+}
+
+function buildFlowEdge(edge: GraphEdge, isSelected = false): Edge {
+  const isAgentEdge = edge.type === "CALLS_AGENT";
+  const strokeWidth = edge.data.issueCount > 0 ? 2.5 : 2;
+  return {
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    animated: isAgentEdge,
+    selected: isSelected,
+    style: {
+      stroke: edge.data.issueCount > 0 ? "#f17c67" : isAgentEdge ? "#ffb454" : "#6dd3c7",
+      strokeWidth: isSelected ? strokeWidth + 1 : strokeWidth,
+    },
+  };
 }
 
 function findSelectedNode(session: SessionSnapshot | null, nodeId: string | null): EditableNode | null {
@@ -211,6 +386,11 @@ function findSelectedNode(session: SessionSnapshot | null, nodeId: string | null
     session.packageData.skills.find((skill) => skill.id === nodeId) ??
     null
   );
+}
+
+function buildFlowKey(session: SessionSnapshot): string {
+  const nodeIds = session.graph.nodes.map((node) => node.id).join(",");
+  return `${session.sessionId}:${nodeIds}`;
 }
 
 function summarizeIssues(issues: ValidationIssue[]) {

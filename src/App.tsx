@@ -30,6 +30,7 @@ interface NodeFormState {
   description: string;
   schemaVersion: string;
   toolsText: string;
+  skillsText: string;
 }
 
 const MIN_ZOOM = 0.4;
@@ -103,6 +104,7 @@ export function App() {
       description: selectedNode.description,
       schemaVersion: "schemaVersion" in selectedNode ? selectedNode.schemaVersion : "",
       toolsText: "tools" in selectedNode ? selectedNode.tools.join("\n") : "",
+      skillsText: "referencedSkills" in selectedNode ? selectedNode.referencedSkills.join("\n") : "",
     });
   }, [selectedNode]);
 
@@ -298,6 +300,7 @@ export function App() {
             description: formState.description,
             schemaVersion: formState.schemaVersion,
             tools: splitList(formState.toolsText),
+            skills: splitList(formState.skillsText),
           }
         : {
             name: formState.name,
@@ -589,12 +592,21 @@ export function App() {
 
                 {"tools" in selectedNode ? (
                   <>
-                    <div className="meta-block">
-                      <div className="meta-block__label">Skills</div>
-                      <div className="meta-block__value">
-                        {selectedNode.referencedSkills.join(", ") || "No links"}
-                      </div>
-                    </div>
+                    <label className="form-field">
+                      <span>Skills</span>
+                      <textarea
+                        value={formState.skillsText}
+                        onChange={(event) =>
+                          setFormState(
+                            (current) =>
+                              current && {
+                                ...current,
+                                skillsText: event.target.value,
+                              },
+                          )
+                        }
+                      />
+                    </label>
                     <div className="meta-block">
                       <div className="meta-block__label">Calls agents</div>
                       <div className="meta-block__value">

@@ -115,6 +115,10 @@ export class SessionManager {
       node.tools = sanitizeStringArray(payload.tools);
     }
 
+    if ("skills" in payload && "referencedSkills" in node && Array.isArray(payload.skills)) {
+      applyAgentSkillList(session, node, sanitizeStringArray(payload.skills));
+    }
+
     reconcilePendingReferences(session);
     validatePackage(session);
     return buildSnapshot(session);
@@ -584,6 +588,51 @@ function buildRelationId(type: RelationType, sourceId: string, targetId: string)
   return `${type}:${sourceId}->${targetId}`;
 }
 
+function applyAgentSkillList(session: SessionState, agent: AgentSpec, nextSkillNames: string[]): void {
+  const nextNames = new Set(nextSkillNames);
+  const skillByName = new Map(session.packageData.skills.map((skill) => [skill.name, skill]));
+
+  // Drop USES_SKILL relations from this agent that are no longer listed.
+  session.packageData.relations = session.packageData.relations.filter((relation) => {
+    if (relation.type !== "USES_SKILL" || relation.sourceId !== agent.id) {
+      return true;
+    }
+    const skill = session.packageData.skills.find((candidate) => candidate.id === relation.targetId);
+    if (skill && nextNames.has(skill.name)) {
+      return true;
+    }
+    return false;
+  });
+
+  // Drop pending references for this agent (will be rebuilt below).
+  session.pendingReferences = session.pendingReferences.filter(
+    (pending) => !(pending.type === "USES_SKILL" && pending.sourceName === agent.name),
+  );
+
+  // Add/keep relations or pending refs for each listed skill.
+  for (const skillName of nextSkillNames) {
+    const skill = skillByName.get(skillName);
+    if (skill) {
+      upsertRelation(session.packageData.relations, "USES_SKILL", agent.id, skill.id, [
+        { location: "agent.skills", documentPath: agent.documentPath },
+      ]);
+    } else {
+      session.pendingReferences.push({
+        id: randomUUID(),
+        type: "USES_SKILL",
+        sourceName: agent.name,
+        targetName: skillName,
+        origin: {
+          location: "agent.skills",
+          documentPath: agent.documentPath,
+        },
+      });
+    }
+  }
+
+  syncProjectionFields(session.packageData);
+}
+
 function reconcilePendingReferences(session: SessionState): void {
   const agentByName = new Map(session.packageData.agents.map((agent) => [agent.name, agent]));
   const skillByName = new Map(session.packageData.skills.map((skill) => [skill.name, skill]));
@@ -942,12 +991,31 @@ function buildSnapshot(session: SessionState): SessionSnapshot {
     },
   }));
 
+  const pendingSkillsByAgent = new Map<string, string[]>();
+  for (const pending of session.pendingReferences) {
+    if (pending.type !== "USES_SKILL" || pending.origin.location !== "agent.skills") {
+      continue;
+    }
+    const list = pendingSkillsByAgent.get(pending.sourceName) ?? [];
+    list.push(pending.targetName);
+    pendingSkillsByAgent.set(pending.sourceName, list);
+  }
+
+  const agentsWithPending = session.packageData.agents.map((agent) => {
+    const pending = pendingSkillsByAgent.get(agent.name);
+    if (!pending || pending.length === 0) {
+      return agent;
+    }
+    return { ...agent, referencedSkills: uniqueSorted([...agent.referencedSkills, ...pending]) };
+  });
+
   return {
     sessionId: session.id,
     scopeId: session.scopeId,
     graph: { nodes, edges },
     packageData: {
       ...session.packageData,
+      agents: agentsWithPending,
       documents: session.packageData.documents.map(stripDocumentState),
     },
   };

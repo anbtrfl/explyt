@@ -147,6 +147,7 @@ export interface UpdateNodePayload {
   description?: string;
   schemaVersion?: string;
   tools?: string[];
+  skills?: string[];
 }
 
 export interface UpdatePositionPayload {

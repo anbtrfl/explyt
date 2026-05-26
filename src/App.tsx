@@ -58,7 +58,19 @@ const EMPTY_OPEN_PAYLOAD = JSON.stringify(
   2,
 );
 
+type Theme = "dark" | "light";
+
 export function App() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") return "dark";
+    return (window.localStorage.getItem("theme") as Theme | null) ?? "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem("theme", theme);
+  }, [theme]);
+
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -450,6 +462,18 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <button
+        type="button"
+        className="theme-toggle"
+        aria-label="Toggle theme"
+        onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+      >
+        <span>{theme === "dark" ? "Light" : "Dark"}</span>
+        <span className="theme-toggle__track">
+          <span className="theme-toggle__thumb" />
+        </span>
+      </button>
+
       <header className="topbar">
         <div>
           <div className="eyebrow">Prototype</div>

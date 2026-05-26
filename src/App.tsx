@@ -476,7 +476,6 @@ export function App() {
 
       <header className="topbar">
         <div>
-          <div className="eyebrow">Prototype</div>
           <h1>Agent Config Visualizer</h1>
           <p className="topbar__text">
             Markdown + YAML frontmatter import, node-based editing, validation,

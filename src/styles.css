@@ -63,10 +63,6 @@
   border-color: rgba(20, 30, 35, 0.08);
 }
 
-[data-theme="light"] .canvas-toolbar__row--primary {
-  border-left-color: rgba(20, 30, 35, 0.08);
-}
-
 [data-theme="light"] .section-card {
   background: rgba(20, 30, 35, 0.03);
   border-color: rgba(20, 30, 35, 0.06);
@@ -154,7 +150,7 @@
 }
 
 .theme-toggle:hover {
-  transform: translateY(-1px);
+  opacity: 0.9;
 }
 
 [data-theme="light"] .theme-toggle {
@@ -269,7 +265,7 @@ input {
 }
 
 .button:hover:not(:disabled) {
-  transform: translateY(-1px);
+  opacity: 0.9;
 }
 
 .button:disabled {
@@ -398,9 +394,6 @@ input {
 }
 
 .canvas-toolbar__row--primary {
-  padding-left: 8px;
-  margin-left: 4px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
   border-top: 0;
 }
 

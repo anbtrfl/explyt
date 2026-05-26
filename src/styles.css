@@ -64,7 +64,7 @@
 }
 
 [data-theme="light"] .canvas-toolbar__row--primary {
-  border-top-color: rgba(20, 30, 35, 0.08);
+  border-left-color: rgba(20, 30, 35, 0.08);
 }
 
 [data-theme="light"] .section-card {
@@ -378,13 +378,14 @@ input {
 
 .canvas-toolbar {
   position: sticky;
-  top: 16px;
+  top: 8px;
   z-index: 5;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 22px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 16px;
   background: rgba(7, 10, 13, 0.88);
   border: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(14px);
@@ -393,12 +394,20 @@ input {
 .canvas-toolbar__row {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .canvas-toolbar__row--primary {
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-left: 8px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 0;
+}
+
+.canvas-toolbar .button {
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  border-radius: 999px;
 }
 
 .canvas-stage {

@@ -425,4 +425,98 @@ describe("export round-trip", () => {
     expect(out.text).toContain("owner: alice");
     expect(out.text).toContain("body");
   });
+
+  it("writes the agents projection when an agent calls another agent", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("a", { agents: ["b"] }),
+      agentDoc("b"),
+    ]));
+    const exp = manager.export(snap.sessionId);
+    expect(exp.blocked).toBe(false);
+    const callerDoc = exp.changedDocuments.find(d => d.path === "agents/a.md")!;
+    expect(callerDoc.text).toContain("agents:");
+    expect(callerDoc.text).toContain("b");
+  });
+
+  it("writes the use-by projection for a skill", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("alpha", { skills: ["s1"] }),
+      skillDoc("s1", { useBy: ["alpha"] }),
+    ]));
+    const exp = manager.export(snap.sessionId);
+    expect(exp.blocked).toBe(false);
+    const skillOut = exp.changedDocuments.find(d => d.path === "skills/s1/SKILL.md")!;
+    expect(skillOut.text).toContain("use-by:");
+    expect(skillOut.text).toContain("alpha");
+  });
+});
+
+describe("SessionManager.updateNode skills list", () => {
+  it("adds a USES_SKILL relation to an existing skill", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("alpha"),
+      skillDoc("s1"),
+    ]));
+    const agent = snap.packageData.agents[0];
+    const updated = manager.updateNode(snap.sessionId, agent.id, { skills: ["s1"] });
+    expect(updated.graph.edges.some(e => e.type === "USES_SKILL")).toBe(true);
+  });
+
+  it("drops a relation when a skill is removed from the list", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("alpha", { skills: ["s1", "s2"] }),
+      skillDoc("s1"),
+      skillDoc("s2"),
+    ]));
+    const agent = snap.packageData.agents[0];
+    const s2 = snap.packageData.skills.find(s => s.name === "s2")!;
+    const updated = manager.updateNode(snap.sessionId, agent.id, { skills: ["s1"] });
+    expect(updated.graph.edges.some(e => e.target === s2.id)).toBe(false);
+    expect(updated.graph.edges.some(e => e.type === "USES_SKILL")).toBe(true);
+  });
+
+  it("creates a pending reference for a skill that does not exist yet", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("alpha"),
+    ]));
+    const agent = snap.packageData.agents[0];
+    const updated = manager.updateNode(snap.sessionId, agent.id, { skills: ["ghost"] });
+    const issue = updated.packageData.issues.find(i => i.code === "REFERENCE_UNRESOLVED");
+    expect(issue).toBeDefined();
+  });
+});
+
+describe("SessionManager edge cases", () => {
+  it("deleteNode removes a skill node", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("alpha", { skills: ["s1"] }),
+      skillDoc("s1", { useBy: ["alpha"] }),
+    ]));
+    const skill = snap.packageData.skills[0];
+    const after = manager.deleteNode(snap.sessionId, skill.id);
+    expect(after.packageData.skills.some(s => s.id === skill.id)).toBe(false);
+  });
+
+  it("keeps building a snapshot when an agent-to-agent reference is unresolved", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      agentDoc("a", { agents: ["ghost"] }),
+    ]));
+    expect(snap.graph.nodes).toHaveLength(1);
+    expect(snap.packageData.issues.some(i => i.code === "REFERENCE_UNRESOLVED")).toBe(true);
+  });
+
+  it("parses a scalar skills field as a single-element list", () => {
+    const manager = new SessionManager();
+    const snap = manager.openSession(baseRequest([
+      { path: "agents/x.md", text: `---\nname: x\nschemaVersion: "v0.1"\nskills: solo\n---\n` },
+    ]));
+    expect(snap.packageData.issues.some(i => i.message.includes("solo"))).toBe(true);
+  });
 });

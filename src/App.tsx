@@ -83,6 +83,8 @@ export function App() {
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [fitViewToken, setFitViewToken] = useState(0);
   const [reactFlowReadyToken, setReactFlowReadyToken] = useState(0);
+  const [sessionSource, setSessionSource] = useState<"workspace" | "browser">("workspace");
+  const [workspacePath, setWorkspacePath] = useState("");
   const reactFlowInstanceRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
 
   const selectedNode = findSelectedNode(session, selectedNodeId);
@@ -191,6 +193,7 @@ export function App() {
       return;
     }
     applySnapshot(snapshot);
+    setSessionSource("workspace");
     setFitViewToken((current) => current + 1);
     setStatusMessage(
       `Opened ${snapshot.packageData.documents.length} documents: ${snapshot.packageData.agents.length} agents, ${snapshot.packageData.skills.length} skills.`,
@@ -210,8 +213,70 @@ export function App() {
       return;
     }
     applySnapshot(snapshot);
+    setSessionSource("browser");
     setFitViewToken((current) => current + 1);
     setStatusMessage(`Opened payload for scope ${snapshot.scopeId}.`);
+  }
+
+  async function openFromPath(): Promise<void> {
+    const trimmed = workspacePath.trim();
+    if (!trimmed) {
+      setStatusMessage("Enter an absolute path to your project folder.");
+      return;
+    }
+    const snapshot = await withBusy("Opening workspace from path", () =>
+      api.post<SessionSnapshot>("/sessions/open-from-path", { rootPath: trimmed }),
+    );
+    if (!snapshot) {
+      return;
+    }
+    applySnapshot(snapshot);
+    setSessionSource("workspace");
+    setPayloadText(
+      JSON.stringify(
+        { scopeId: snapshot.scopeId, documents: snapshot.packageData.documents.map((d) => ({ path: d.path, text: d.rawText })) },
+        null,
+        2,
+      ),
+    );
+    setFitViewToken((current) => current + 1);
+    setStatusMessage(
+      `Opened ${snapshot.packageData.documents.length} files from ${trimmed}. Save writes back to the same folder.`,
+    );
+  }
+
+  async function downloadChanges(): Promise<void> {
+    if (!session) {
+      return;
+    }
+    const result = await withBusy("Preparing download", () =>
+      api.post<ExportPackage>(`/sessions/${session.sessionId}/export`, {}),
+    );
+    if (!result) {
+      return;
+    }
+    if (result.blocked) {
+      setStatusMessage(
+        `Download blocked by ${result.issues.filter((issue) => issue.severity === "error").length} errors. Fix them first.`,
+      );
+      return;
+    }
+    if (result.changedDocuments.length === 0 && result.deletedDocuments.length === 0) {
+      setStatusMessage("Nothing to download — no changes since the last load.");
+      return;
+    }
+    const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${session.scopeId || "workspace"}-changes.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setStatusMessage(
+      `Downloaded ${result.changedDocuments.length} changed and ${result.deletedDocuments.length} deleted entries as JSON.`,
+    );
   }
 
   async function runValidation(): Promise<void> {
@@ -268,7 +333,6 @@ export function App() {
       return;
     }
 
-    await loadWorkspaceSample();
     setStatusMessage(describeExportResult(result, "Saved"));
   }
 
@@ -683,8 +747,13 @@ export function App() {
               </button>
               <button
                 className="button"
-                disabled={!session}
+                disabled={!session || sessionSource === "browser"}
                 onClick={() => void saveToRepository()}
+                title={
+                  sessionSource === "browser"
+                    ? "Browser-loaded session is read-only on disk. Use «Download changes…» in Advanced to get edited files."
+                    : undefined
+                }
               >
                 Save to repository
               </button>
@@ -815,16 +884,51 @@ export function App() {
           <div className="advanced-panel__body">
             <div className="section-card__header">
               <h2>Open Session</h2>
+              <div className="section-card__actions">
+                <button
+                  className="button button--ghost button--small"
+                  onClick={() => void downloadChanges()}
+                  disabled={!session || sessionSource === "browser"}
+                  title={
+                    sessionSource === "browser"
+                      ? "Download edits made on a payload-based session as a JSON bundle"
+                      : "Use Save to repository for folder-backed sessions, or open a payload to enable this"
+                  }
+                >
+                  Download changes…
+                </button>
+                <button
+                  className="button button--ghost button--small"
+                  onClick={() => void openPayload()}
+                >
+                  Open payload
+                </button>
+              </div>
+            </div>
+            <div className="path-input-row">
+              <input
+                className="path-input"
+                type="text"
+                value={workspacePath}
+                placeholder="/absolute/path/to/your/project"
+                onChange={(event) => setWorkspacePath(event.target.value)}
+                spellCheck={false}
+              />
               <button
-                className="button button--ghost button--small"
-                onClick={() => void openPayload()}
+                className="button button--small"
+                onClick={() => void openFromPath()}
+                disabled={!workspacePath.trim()}
               >
-                Open payload
+                Open from path
               </button>
             </div>
             <p className="section-card__hint">
-              The workspace loader uses the current repo. The payload editor
-              mirrors the `POST /sessions/open` contract.
+              Type an absolute path to a project folder that contains
+              <code> agents/</code> and/or <code> skills/</code> subdirectories.
+              The server reads markdown files from there and writes Save back
+              to the same place. Alternatively, paste a JSON workspace
+              description below (the <code>POST /sessions/open</code>
+              contract) and press <em>Open payload</em>.
             </p>
             <textarea
               className="payload-editor"

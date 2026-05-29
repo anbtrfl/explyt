@@ -16,8 +16,11 @@ const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const sessionManager = new SessionManager();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, "..");
-const distDir = path.join(projectRoot, "dist");
+const repoRoot = path.resolve(__dirname, "..");
+const workspaceRoot = process.env.WORKSPACE_ROOT ? path.resolve(process.env.WORKSPACE_ROOT) : repoRoot;
+const distDir = path.join(repoRoot, "dist");
+// sessionId → absolute path of the workspace this session was opened from
+const sessionRootMap = new Map<string, string>();
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -27,7 +30,7 @@ app.get("/api/health", (_request, response) => {
 
 app.get("/api/demo/documents", async (_request, response, next) => {
   try {
-    response.json(await loadWorkspaceDocuments(projectRoot));
+    response.json(await loadWorkspaceDocuments(workspaceRoot));
   } catch (error) {
     next(error);
   }
@@ -35,7 +38,33 @@ app.get("/api/demo/documents", async (_request, response, next) => {
 
 app.post("/api/sessions/open", (request, response, next) => {
   try {
-    response.json(sessionManager.openSession(request.body as OpenSessionRequest));
+    const snapshot = sessionManager.openSession(request.body as OpenSessionRequest);
+    // A payload-based session has no backing folder; drop any stale mapping.
+    sessionRootMap.delete(snapshot.sessionId);
+    response.json(snapshot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/open-from-path", async (request, response, next) => {
+  try {
+    const body = request.body as { rootPath?: unknown };
+    if (typeof body?.rootPath !== "string" || body.rootPath.trim() === "") {
+      response.status(400).json({ message: "rootPath must be a non-empty string" });
+      return;
+    }
+    const absoluteRoot = path.resolve(body.rootPath.trim());
+    const payload = await loadWorkspaceDocuments(absoluteRoot);
+    if (payload.documents.length === 0) {
+      response.status(400).json({
+        message: `No agent or skill markdown files found under ${absoluteRoot}. Expected agents/ and/or skills/ subfolders inside.`,
+      });
+      return;
+    }
+    const snapshot = sessionManager.openSession(payload);
+    sessionRootMap.set(snapshot.sessionId, absoluteRoot);
+    response.json(snapshot);
   } catch (error) {
     next(error);
   }
@@ -73,7 +102,8 @@ app.post("/api/sessions/:sessionId/export", (request, response, next) => {
 app.post("/api/sessions/:sessionId/save", async (request, response, next) => {
   try {
     const exportPackage = sessionManager.export(request.params.sessionId);
-    response.json(await saveExportedDocuments(projectRoot, exportPackage));
+    const targetRoot = sessionRootMap.get(request.params.sessionId) ?? workspaceRoot;
+    response.json(await saveExportedDocuments(targetRoot, exportPackage));
   } catch (error) {
     next(error);
   }
@@ -152,4 +182,7 @@ app.get(/^(?!\/api\/).*/, (request, response) => {
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
+  if (workspaceRoot !== repoRoot) {
+    console.log(`Workspace root: ${workspaceRoot}`);
+  }
 });

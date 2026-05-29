@@ -441,6 +441,30 @@ input {
   font-size: 1rem;
 }
 
+.section-card__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.path-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2c3a36);
+  background: var(--input-bg, #131a18);
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88rem;
+}
+
 .section-card__hint {
   margin: 0 0 10px;
   color: #bdc7c4;

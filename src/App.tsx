@@ -290,10 +290,13 @@ export function App() {
       return;
     }
     setValidationResult(result);
+    const issueCount = result.issues.length;
     setStatusMessage(
       result.blocked
-        ? `Validation found ${result.issues.length} issues and export is currently blocked.`
-        : `Validation completed with ${result.issues.length} issues.`,
+        ? `Validation found ${issueCount} issue${issueCount === 1 ? "" : "s"} and export is currently blocked.`
+        : issueCount === 0
+          ? "Validation passed with no issues."
+          : `Validation completed with ${issueCount} issue${issueCount === 1 ? "" : "s"}.`,
     );
   }
 
@@ -398,17 +401,32 @@ export function App() {
     setStatusMessage("Relation added.");
   }
 
+  async function deleteRelationById(relationId: string): Promise<SessionSnapshot | undefined> {
+    if (!session) {
+      return undefined;
+    }
+    return withBusy("Removing relation", () =>
+      api.delete<SessionSnapshot>(`/sessions/${session.sessionId}/relations/${relationId}`),
+    );
+  }
+
+  async function deleteNodeById(nodeId: string): Promise<SessionSnapshot | undefined> {
+    if (!session) {
+      return undefined;
+    }
+    return withBusy("Removing node", () =>
+      api.delete<SessionSnapshot>(`/sessions/${session.sessionId}/nodes/${nodeId}`),
+    );
+  }
+
   async function onDeleteEdges(edges: Edge[]): Promise<void> {
     if (!session || edges.length === 0) {
       return;
     }
     let lastSnapshot: SessionSnapshot | undefined;
     for (const edge of edges) {
-      lastSnapshot = await withBusy("Removing relation", () =>
-        api.delete<SessionSnapshot>(`/sessions/${session.sessionId}/relations/${edge.id}`),
-      );
+      lastSnapshot = await deleteRelationById(edge.id);
     }
-
     if (!lastSnapshot) {
       return;
     }
@@ -422,15 +440,11 @@ export function App() {
     }
     let lastSnapshot: SessionSnapshot | undefined;
     for (const node of nodes) {
-      lastSnapshot = await withBusy("Removing node", () =>
-        api.delete<SessionSnapshot>(`/sessions/${session.sessionId}/nodes/${node.id}`),
-      );
+      lastSnapshot = await deleteNodeById(node.id);
     }
-
     if (!lastSnapshot) {
       return;
     }
-
     applySnapshot(lastSnapshot, selectedNodeId);
     setFitViewToken((current) => current + 1);
     setStatusMessage(`Removed ${nodes.length} node${nodes.length === 1 ? "" : "s"}.`);
@@ -442,22 +456,23 @@ export function App() {
     }
 
     if (selectedEdge) {
-      await onDeleteEdges([buildFlowEdge(selectedEdge, true)]);
+      const snapshot = await deleteRelationById(selectedEdge.id);
+      if (!snapshot) {
+        return;
+      }
+      applySnapshot(snapshot, selectedNodeId);
+      setStatusMessage("Removed 1 relation.");
       return;
     }
 
     if (selectedNode) {
-      await onDeleteNodes([
-        {
-          id: selectedNode.id,
-          position: {
-            x: selectedNode.visualMeta.x,
-            y: selectedNode.visualMeta.y,
-          },
-          data: {},
-          type: "schemaVersion" in selectedNode ? "agent" : "skill",
-        } as Node,
-      ]);
+      const snapshot = await deleteNodeById(selectedNode.id);
+      if (!snapshot) {
+        return;
+      }
+      applySnapshot(snapshot, null);
+      setFitViewToken((current) => current + 1);
+      setStatusMessage("Removed 1 node.");
     }
   }
 
@@ -767,9 +782,10 @@ export function App() {
                 autoPanOnNodeFocus={false}
                 autoPanOnConnect={false}
                 autoPanOnNodeDrag={false}
+                deleteKeyCode={null}
                 edges={flowEdges}
                 maxZoom={MAX_ZOOM}
-                minZoom={0.4}
+                minZoom={MIN_ZOOM}
                 nodeTypes={nodeTypes}
                 nodes={flowNodes}
                 onConnect={(connection) => void onConnect(connection)}
@@ -888,12 +904,8 @@ export function App() {
                 <button
                   className="button button--ghost button--small"
                   onClick={() => void downloadChanges()}
-                  disabled={!session || sessionSource === "browser"}
-                  title={
-                    sessionSource === "browser"
-                      ? "Download edits made on a payload-based session as a JSON bundle"
-                      : "Use Save to repository for folder-backed sessions, or open a payload to enable this"
-                  }
+                  disabled={!session}
+                  title="Download edited files as a JSON bundle (works in any mode; required when Save to repository is not available)"
                 >
                   Download changes…
                 </button>
@@ -913,6 +925,7 @@ export function App() {
                 placeholder="/absolute/path/to/your/project"
                 onChange={(event) => setWorkspacePath(event.target.value)}
                 spellCheck={false}
+                aria-label="Absolute path to your project folder"
               />
               <button
                 className="button button--small"
@@ -935,6 +948,7 @@ export function App() {
               value={payloadText}
               onChange={(event) => setPayloadText(event.target.value)}
               spellCheck={false}
+              aria-label="JSON workspace description"
             />
           </div>
         </details>

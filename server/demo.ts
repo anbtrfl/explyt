@@ -36,6 +36,10 @@ async function collectMarkdownFiles(directory: string): Promise<string[]> {
   const entries = await fs.readdir(directory, { withFileTypes: true });
 
   for (const entry of entries) {
+    // Skip symlinks to avoid following loops or escaping the workspace root.
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
     const absolutePath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
       output.push(...(await collectMarkdownFiles(absolutePath)));

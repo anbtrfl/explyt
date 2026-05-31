@@ -131,9 +131,6 @@ app.post("/api/sessions/:sessionId/save", async (request, response, next) => {
     const sessionId = request.params.sessionId;
     const mappedRoot = sessionRootMap.get(sessionId);
     const customWorkspaceRoot = process.env.WORKSPACE_ROOT !== undefined;
-    // A payload-only session (no backing folder, and the server was not started with an
-    // explicit WORKSPACE_ROOT) has nowhere safe to write — refuse instead of silently
-    // dumping edits into the repository the dev server lives in.
     if (!mappedRoot && !customWorkspaceRoot) {
       response.status(400).json({
         message:

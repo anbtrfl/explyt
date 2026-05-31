@@ -2,7 +2,7 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${input}`, {
     headers: {
       "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
+      ...init?.headers,
     },
     ...init,
   });

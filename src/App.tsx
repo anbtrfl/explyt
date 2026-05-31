@@ -94,6 +94,8 @@ export function App() {
 
   useEffect(() => {
     void loadWorkspaceSample();
+    // Mount-only: loadWorkspaceSample only reads stable setters, no need to track its identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -535,6 +537,9 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+    // deleteCurrentSelection is recreated each render, but the listener reads through
+    // the closure on each event and we re-attach below; intentional.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deleteCurrentSelection, selectedEdge, selectedNode, session]);
 
   const handleNodeClick = (_event: unknown, node: Node) => {
@@ -600,6 +605,7 @@ export function App() {
                 <label className="form-field">
                   <span>Name</span>
                   <input
+                    aria-label="Node name"
                     value={formState.name}
                     onChange={(event) =>
                       setFormState(
@@ -614,6 +620,7 @@ export function App() {
                   <label className="form-field">
                     <span>Schema version</span>
                     <input
+                      aria-label="Schema version"
                       value={formState.schemaVersion}
                       onChange={(event) =>
                         setFormState(
@@ -631,6 +638,7 @@ export function App() {
                 <label className="form-field">
                   <span>Description</span>
                   <textarea
+                    aria-label="Description"
                     value={formState.description}
                     onChange={(event) =>
                       setFormState(
@@ -648,6 +656,7 @@ export function App() {
                   <label className="form-field">
                     <span>Tools</span>
                     <textarea
+                      aria-label="Tools list"
                       value={formState.toolsText}
                       onChange={(event) =>
                         setFormState(
@@ -674,6 +683,7 @@ export function App() {
                     <label className="form-field">
                       <span>Skills</span>
                       <textarea
+                        aria-label="Skills list"
                         value={formState.skillsText}
                         onChange={(event) =>
                           setFormState(
